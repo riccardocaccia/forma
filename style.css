@@ -284,3 +284,19 @@ input[type=checkbox]:checked::after { transform: translateX(20px); }
 .toast { pointer-events: none; }
 .toast.show { transform: translate(-50%, 0); }
 .chart text, .chart path:not(.line), .spark path, .spark circle { stroke: none; }
+
+.row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 14px; }
+.round.pt { font-weight: 700; font-size: 17px; color: var(--orange); }
+.round.pt.on { background: var(--orange); color: #000; }
+.meal.part { opacity: .8; }
+.swap-link { display: block; color: var(--sec); font-size: 13px; margin-top: 6px; text-align: left; }
+.swap-link.on { color: var(--blue); }
+.swap-tag { display: block; color: var(--blue); font-size: 13px; font-weight: 400; }
+.menu-chip { display: block; width: 100%; text-align: center; background: var(--card); color: var(--sec); border-radius: 12px; padding: 10px; font-size: 14px; margin-bottom: 12px; }
+.menu-chip b { color: var(--text); } .menu-chip.on { background: rgba(10,132,255,.16); color: var(--blue); }
+.menu-chip svg { width: 13px; height: 13px; vertical-align: -2px; }
+.fr { font-style: normal; color: var(--orange); font-weight: 600; font-size: 13px; }
+.part-list { display: grid; gap: 12px; margin-bottom: 12px; }
+.part-row span { display: block; font-size: 15px; margin-bottom: 6px; }
+.seg.mini { grid-template-columns: repeat(4, 1fr); margin: 0; background: var(--card2); }
+.seg.mini button.on { background: var(--blue); color: #fff; }

@@ -1,5 +1,5 @@
 /* Service worker: rete prima (così gli aggiornamenti arrivano subito), cache come riserva offline */
-const CACHE = 'forma-v1';
+const CACHE = 'forma-v2';
 const FILES = ['./', 'index.html', 'style.css', 'data.js', 'app.js', 'manifest.webmanifest', 'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {

@@ -182,8 +182,16 @@ function pendingWorkouts() {
 }
 
 /* ---------- dieta ---------- */
-const dietDay = k => S.diet.days[dow(k)] || [];
-const dlog = k => { const l = S.logs.diet[k] || (S.logs.diet[k] = { m: {}, c: {}, adj: {}, extra: [] }); l.m ||= {}; l.c ||= {}; l.adj ||= {}; l.extra ||= []; return l; };
+const daySrc = k => { const l = S.logs.diet[k]; return l && l.src != null ? +l.src : dow(k); };
+function dietDay(k) {
+  const l = S.logs.diet[k] || {}; const sw = l.swap || {};
+  return (S.diet.days[daySrc(k)] || []).map(m => {
+    const s = sw[m.id]; if (!s) return m;
+    const src = (S.diet.days[s.d] || []).find(x => x.id === s.m);
+    return src ? { ...src, id: m.id, n: m.n, from: `${src.n.toLowerCase()} di ${DOW[s.d].toLowerCase()}` } : m;
+  });
+}
+const dlog = k => { const l = S.logs.diet[k] || (S.logs.diet[k] = { m: {}, c: {}, adj: {}, extra: [] }); l.m ||= {}; l.c ||= {}; l.adj ||= {}; l.extra ||= []; l.part ||= {}; l.swap ||= {}; return l; };
 const peekDlog = k => S.logs.diet[k] || { m: {}, c: {}, adj: {}, extra: [] };
 const chosenOpt = (k, item) => item.o[Math.min((peekDlog(k).c || {})[item.id] || 0, item.o.length - 1)];
 
@@ -200,10 +208,18 @@ function itemMacros(k, item, withAdj = true) {
   return opt.reduce((a, part, i) => addM(a, partMacros(part, i === 0 ? adj : 0)), ZERO);
 }
 const mealMacros = (k, m, withAdj = true) => m.items.reduce((a, it) => addM(a, itemMacros(k, it, withAdj)), ZERO);
+const scaleM = (m, f) => ({ k: m.k * f, p: m.p * f, c: m.c * f, f: m.f * f });
+const subM = (a, b) => ({ k: Math.max(0, a.k - b.k), p: Math.max(0, a.p - b.p), c: Math.max(0, a.c - b.c), f: Math.max(0, a.f - b.f) });
+function mealEaten(k, m, frOverride) {
+  const l = peekDlog(k); const st = frOverride ? 'part' : l.m[m.id];
+  if (st === 'done') return mealMacros(k, m);
+  if (st === 'part') { const fr = frOverride || (l.part || {})[m.id] || {}; return m.items.reduce((a, it) => addM(a, scaleM(itemMacros(k, it), fr[it.id] ?? 1)), ZERO); }
+  return ZERO;
+}
 function extraMacros(x) { return x.parts.reduce((a, pt) => addM(a, partMacros(pt)), ZERO); }
 function dayTotals(k) {
   const l = peekDlog(k); let plan = ZERO, eaten = ZERO;
-  dietDay(k).forEach(m => { plan = addM(plan, mealMacros(k, m, false)); if (l.m[m.id] === 'done') eaten = addM(eaten, mealMacros(k, m)); });
+  dietDay(k).forEach(m => { plan = addM(plan, mealMacros(k, m, false)); eaten = addM(eaten, mealEaten(k, m)); });
   (l.extra || []).forEach(x => { if (x.done) eaten = addM(eaten, extraMacros(x)); });
   return { plan, eaten };
 }
@@ -211,9 +227,9 @@ const partLabel = pt => `${pt.n} ${pt.u === 'pz' ? pt.g + ' pz' : pt.g + ' ' + p
 const optLabel = opt => opt.map(partLabel).join(' + ');
 const foodCat = part => (FOODS[part.f] || {}).cat || '?';
 
-function recoverMealOptions(k, mealId) {
+function recoverMealOptions(k, mealId, missedOverride) {
   const meals = dietDay(k); const idx = meals.findIndex(m => m.id === mealId); if (idx < 0) return [];
-  const missed = mealMacros(k, meals[idx]); const l = peekDlog(k);
+  const missed = missedOverride || mealMacros(k, meals[idx]); const l = peekDlog(k);
   const remaining = meals.slice(idx + 1).filter(m => !l.m[m.id]);
   const isMain = m => mealMacros(k, m, false).k >= 350 && m.items.some(i => foodCat(chosenOpt(k, i)[0]) === 'P') && m.items.some(i => foodCat(chosenOpt(k, i)[0]) === 'C');
   const mains = remaining.filter(isMain);
@@ -271,8 +287,9 @@ function snackPlan(missed, when) {
   return { type: 'snack', title: `Spuntino di recupero ${when}`, parts: best.parts, desc: `${optLabel(best.parts)} · circa ${Math.round(missed.k)} kcal, ${Math.round(missed.p)} g di proteine.` };
 }
 
-function applyMealRecovery(k, mealId, o) {
-  const l = dlog(k); l.m[mealId] = 'skip'; l.rec ||= {};
+function applyMealRecovery(k, mealId, o, partFr) {
+  const l = dlog(k); l.m[mealId] = partFr ? 'part' : 'skip'; l.rec ||= {};
+  if (partFr) l.part[mealId] = partFr;
   l.rec[mealId] = o.title;
   if (o.type === 'boost') o.changes.forEach(c => { l.adj[c.itemId] = (l.adj[c.itemId] || 0) + c.g; });
   if (o.type === 'snack') l.extra.push({ id: uid(), n: 'Spuntino di recupero', parts: o.parts, done: false });
@@ -302,8 +319,8 @@ function buildReport() {
     const h = exHistory(e.id).filter(x => x.k >= start);
     if (h.length) { const a = h[h.length - 1], b = h[0]; prog.push(`- ${e.n}: ${fmtKg(topW(a.sets))} kg → ${fmtKg(topW(b.sets))} kg (ultime rip: ${b.sets.map(s => s.r).join('/')}, target ${e.repMin}-${e.repMax})`); }
   }));
-  let mealsTot = 0, mealsDone = 0, mealsSkip = 0; const skipBy = {};
-  days.forEach(d => { if (d === end) return; const l = peekDlog(d); dietDay(d).forEach(m => { mealsTot++; if (l.m[m.id] === 'done') mealsDone++; else { if (l.m[m.id] === 'skip') mealsSkip++; skipBy[m.n] = (skipBy[m.n] || 0) + 1; } }); });
+  let mealsTot = 0, mealsDone = 0, mealsSkip = 0, mealsPart = 0, swappedDays = 0; const skipBy = {};
+  days.forEach(d => { if (d === end) return; const l = peekDlog(d); dietDay(d).forEach(m => { mealsTot++; if (l.m[m.id] === 'done') mealsDone++; else if (l.m[m.id] === 'part') { mealsDone += 0.5; mealsPart++; } else { if (l.m[m.id] === 'skip') mealsSkip++; skipBy[m.n] = (skipBy[m.n] || 0) + 1; } }); if (l.src != null && +l.src !== dow(d)) swappedDays++; });
   const worstMeal = Object.entries(skipBy).sort((a, b) => b[1] - a[1])[0];
   const wDays = days.filter(d => d < end); const wAvg = wDays.length ? wDays.reduce((a, d) => a + waterTotal(d), 0) / wDays.length : 0;
   const wDaysOk = wDays.filter(d => waterTotal(d) >= S.settings.waterGoal).length;
@@ -320,7 +337,7 @@ ${skippedList.length ? 'Saltati: ' + skippedList.join('; ') + '\n' : ''}
 Progressione carichi:
 ${prog.length ? prog.join('\n') : '- nessun dato registrato'}
 
-Dieta: ${mealsDone}/${mealsTot} pasti completati (${mealsTot ? Math.round(mealsDone / mealsTot * 100) : 0}%), ${mealsSkip} saltati.${worstMeal ? ` Il pasto che salto/dimentico di più: ${worstMeal[0]} (${worstMeal[1]} volte).` : ''}
+Dieta: aderenza ${mealsTot ? Math.round(mealsDone / mealsTot * 100) : 0}% (${mealsTot} pasti previsti: ${mealsSkip} saltati, ${mealsPart} parziali${swappedDays ? `, ${swappedDays} giorni con il menu di un altro giorno` : ''}).${worstMeal ? ` Il pasto che salto/dimentico di più: ${worstMeal[0]} (${worstMeal[1]} volte).` : ''}
 
 Acqua: media ${fmtL(Math.round(wAvg / 50) * 50)} al giorno (obiettivo ${fmtL(S.settings.waterGoal)}), obiettivo raggiunto ${wDaysOk}/${wDays.length} giorni.
 
@@ -428,13 +445,13 @@ function vToday() {
   }
   if (isJudo(t) && p) h += `<div class="card slim"><span class="pill orange">${I.judo}Judo</span> <span class="muted">anche judo oggi</span></div>`;
   // dieta
-  const meals = dietDay(t); const l = peekDlog(t); const next = meals.find(m => !l.m[m.id]); const doneN = meals.filter(m => l.m[m.id] === 'done').length;
+  const meals = dietDay(t); const l = peekDlog(t); const next = meals.find(m => !l.m[m.id]); const doneN = meals.filter(m => l.m[m.id] === 'done' || l.m[m.id] === 'part').length;
   h += `<div class="card"><div class="card-h"><span class="pill green">${I.diet}Dieta</span><span class="muted sm">${doneN}/${meals.length} pasti</span></div>`;
   h += `<div class="bar"><i style="width:${meals.length ? doneN / meals.length * 100 : 0}%"></i></div>`;
   (l.extra || []).filter(x => !x.done).forEach(x => { h += `<div class="next-meal"><b>${esc(x.n)}</b><p>${esc(optLabel(x.parts))}</p><div class="row2">${btn('Fatto', 'extraDone', `data-k="${t}" data-id="${x.id}"`, 'primary sm')}</div></div>`; });
   if (next) {
-    h += `<div class="next-meal"><b>Prossimo: ${esc(next.n)}</b><p>${next.items.map(i => esc(optLabel(chosenOpt(t, i)) + ((l.adj || {})[i.id] ? ` (+${l.adj[i.id]})` : ''))).join(' · ')}</p>
-      <div class="row2">${btn('Fatto', 'mealDone', `data-k="${t}" data-m="${next.id}"`, 'primary sm')}${btn('Saltato', 'mealSkip', `data-k="${t}" data-m="${next.id}"`, 'tinted sm')}</div></div>`;
+    h += `<div class="next-meal"><b>Prossimo: ${esc(next.n)}</b>${next.from ? `<span class="swap-tag">⇄ ${esc(next.from)}</span>` : ''}<p>${next.items.map(i => esc(optLabel(chosenOpt(t, i)) + ((l.adj || {})[i.id] ? ` (+${l.adj[i.id]})` : ''))).join(' · ')}</p>
+      <div class="row3">${btn('Fatto', 'mealDone', `data-k="${t}" data-m="${next.id}"`, 'primary sm')}${btn('Parziale', 'mealPart', `data-k="${t}" data-m="${next.id}"`, 'tinted sm')}${btn('Saltato', 'mealSkip', `data-k="${t}" data-m="${next.id}"`, 'tinted sm')}</div></div>`;
   } else if (meals.length) h += `<div class="done-row">${I.check} Tutti i pasti di oggi completati</div>`;
   h += `<button class="link" data-a="tab" data-t="diet">Vedi tutta la giornata ${I.chev}</button></div>`;
   // acqua
@@ -539,19 +556,26 @@ function vDiet() {
   const k = UI.dietDate; const meals = dietDay(k); const l = peekDlog(k); const tot = dayTotals(k);
   let h = header('Dieta', { right: `<button class="txt-btn" data-a="editDiet">Modifica</button>` });
   h += `<div class="daynav"><button class="icon-btn" data-a="dietDay" data-d="-1">${I.back}</button><div><b>${k === today() ? 'Oggi' : DOW[dow(k)]}</b><span>${fmtDate(k)}</span></div><button class="icon-btn" data-a="dietDay" data-d="1"><i class="flip">${I.back}</i></button></div>`;
-  const pct = tot.plan.k ? tot.eaten.k / tot.plan.k : 0;
+  const src = daySrc(k);
+  h += `<button class="menu-chip ${src !== dow(k) ? 'on' : ''}" data-a="pickDayMenu" data-k="${k}">${src !== dow(k) ? `⇄ Oggi segui il menu di <b>${DOW[src]}</b>` : `Menu di <b>${DOW[src]}</b>`} · cambia ${I.chev}</button>`;
   h += `<div class="card macro-card">${ring(tot.eaten.k, tot.plan.k, 104, 10, 'var(--green)', `<b>${Math.round(tot.eaten.k)}</b><span>/${Math.round(tot.plan.k)} kcal</span>`)}
     <div class="macros">${[['Proteine', 'p', 'var(--blue)'], ['Carboidrati', 'c', 'var(--orange)'], ['Grassi', 'f', 'var(--pink)']].map(([n, m, c]) => `<div><span>${n}</span><div class="bar thin"><i style="width:${Math.min(100, tot.plan[m] ? tot.eaten[m] / tot.plan[m] * 100 : 0)}%;background:${c}"></i></div><small>${Math.round(tot.eaten[m])} / ${Math.round(tot.plan[m])} g</small></div>`).join('')}</div></div>`;
   h += `<p class="muted sm center">Valori nutrizionali indicativi, calcolati con medie standard degli alimenti.</p>`;
   meals.forEach(m => {
     const st = l.m[m.id]; const mm = mealMacros(k, m);
-    h += `<div class="card meal ${st || ''}"><div class="meal-h"><div><b>${esc(m.n)}</b><span>${Math.round(mm.k)} kcal · ${Math.round(mm.p)} g prot.</span></div>
-      <div class="meal-act">${st === 'done' ? `<button class="round ok" data-a="mealUndo" data-k="${k}" data-m="${m.id}">${I.check}</button>` : st === 'skip' ? `<button class="round sk" data-a="mealUndo" data-k="${k}" data-m="${m.id}">${I.x}</button>` : `<button class="round" data-a="mealSkip" data-k="${k}" data-m="${m.id}">${I.x}</button><button class="round go" data-a="mealDone" data-k="${k}" data-m="${m.id}">${I.check}</button>`}</div></div>`;
+    const act = st === 'done' ? `<button class="round ok" data-a="mealUndo" data-k="${k}" data-m="${m.id}">${I.check}</button>`
+      : st === 'skip' ? `<button class="round sk" data-a="mealUndo" data-k="${k}" data-m="${m.id}">${I.x}</button>`
+        : st === 'part' ? `<button class="round pt on" data-a="mealUndo" data-k="${k}" data-m="${m.id}">½</button>`
+          : `<button class="round" data-a="mealSkip" data-k="${k}" data-m="${m.id}">${I.x}</button><button class="round pt" data-a="mealPart" data-k="${k}" data-m="${m.id}">½</button><button class="round go" data-a="mealDone" data-k="${k}" data-m="${m.id}">${I.check}</button>`;
+    h += `<div class="card meal ${st || ''}"><div class="meal-h"><div><b>${esc(m.n)}</b><span>${Math.round(mm.k)} kcal · ${Math.round(mm.p)} g prot.</span></div><div class="meal-act">${act}</div></div>`;
+    h += `<button class="swap-link ${m.from ? 'on' : ''}" data-a="swapMeal" data-k="${k}" data-m="${m.id}">⇄ ${m.from ? `Al posto del previsto: ${esc(m.from)}` : 'Ho mangiato un altro pasto del piano'}</button>`;
     if (st === 'skip' && l.rec && l.rec[m.id]) h += `<p class="rec-note">Saltato · ${esc(l.rec[m.id])}</p>`;
+    if (st === 'part') { const miss = subM(mm, mealEaten(k, m)); h += `<p class="rec-note">Parziale · mancavano ${Math.round(miss.k)} kcal${l.rec && l.rec[m.id] ? ` · ${esc(l.rec[m.id])}` : ''}</p>`; }
     h += `<div class="items">`;
     m.items.forEach(it => {
       const opt = chosenOpt(k, it); const adj = (l.adj || {})[it.id];
-      h += `<button class="item" data-a="${it.o.length > 1 ? 'pickAlt' : ''}" data-k="${k}" data-m="${m.id}" data-i="${it.id}"><span>${esc(optLabel(opt))}${adj ? ` <em class="adj">+${adj} ${opt[0].u === 'ml' ? 'ml' : 'g'}</em>` : ''}</span>${it.o.length > 1 ? `<i class="alt">${it.o.length - 1} alternative ${I.chev}</i>` : ''}</button>`;
+      const fr = st === 'part' ? ((l.part || {})[m.id] || {})[it.id] ?? 1 : null;
+      h += `<button class="item" data-a="${it.o.length > 1 ? 'pickAlt' : ''}" data-k="${k}" data-m="${m.id}" data-i="${it.id}"><span>${fr != null && fr < 1 ? `<em class="fr">${FRL[fr] || Math.round(fr * 100) + '%'}</em> ` : ''}${esc(optLabel(opt))}${adj ? ` <em class="adj">+${adj} ${opt[0].u === 'ml' ? 'ml' : 'g'}</em>` : ''}</span>${it.o.length > 1 ? `<i class="alt">${it.o.length - 1} alternative ${I.chev}</i>` : ''}</button>`;
     });
     h += `</div></div>`;
   });
@@ -561,6 +585,7 @@ function vDiet() {
   return h;
 }
 
+const FRL = { 0: 'niente', 0.25: '¼', 0.5: '½', 0.75: '¾' };
 function vDietEdit() {
   const d = UI.editDietDay ?? 1;
   let h = header('Modifica dieta', { back: true });
@@ -622,12 +647,12 @@ function vProg() {
   for (let i = 1; i <= 28; i++) {
     const d = addDays(t, -i); if (d < S.settings.startDate) break;
     const p = planned(d); const s = S.logs.sessions[d]; if (p) { gp++; if (s && s.status === 'done') gd++; }
-    const l = peekDlog(d); dietDay(d).forEach(m => { mt++; if (l.m[m.id] === 'done') md++; });
+    const l = peekDlog(d); dietDay(d).forEach(m => { mt++; if (l.m[m.id] === 'done') md++; else if (l.m[m.id] === 'part') md += 0.5; });
     if (waterTotal(d) >= S.settings.waterGoal) wo++;
   }
   const days = Math.min(28, Math.max(0, daysBetween(S.settings.startDate, t)));
   h += `<p class="section-t">Costanza (ultime 4 settimane)</p><div class="card stats">
-    ${[['Allenamenti', gp ? gd / gp : 0, `${gd}/${gp}`, 'var(--blue)'], ['Pasti', mt ? md / mt : 0, `${md}/${mt}`, 'var(--green)'], ['Acqua ok', days ? wo / days : 0, `${wo}/${days} gg`, 'var(--cyan)']].map(([n, v, s, c]) => `<div>${ring(v, 1, 76, 8, c, `<b class="sm">${Math.round(v * 100)}%</b>`)}<span>${n}</span><small>${s}</small></div>`).join('')}</div>`;
+    ${[['Allenamenti', gp ? gd / gp : 0, `${gd}/${gp}`, 'var(--blue)'], ['Pasti', mt ? md / mt : 0, `${Math.round(md)}/${mt}`, 'var(--green)'], ['Acqua ok', days ? wo / days : 0, `${wo}/${days} gg`, 'var(--cyan)']].map(([n, v, s, c]) => `<div>${ring(v, 1, 76, 8, c, `<b class="sm">${Math.round(v * 100)}%</b>`)}<span>${n}</span><small>${s}</small></div>`).join('')}</div>`;
   if (!days) h += `<p class="muted sm center">Le statistiche partono da domani: oggi è il tuo primo giorno con Forma.</p>`;
   return h;
 }
@@ -735,7 +760,16 @@ async function copyText(t) {
     let ok = false; try { ok = document.execCommand('copy'); } catch (e2) { /* niente */ } ta.remove(); return ok;
   }
 }
-let pendingRecovery = null;
+let pendingRecovery = null, pendingPartial = null;
+const FR_OPTS = [[0, 'Niente'], [0.5, 'Metà'], [0.75, '¾'], [1, 'Tutto']];
+function partialSheet() {
+  const { k, mid, fr } = pendingPartial; const m = dietDay(k).find(x => x.id === mid);
+  const eaten = mealEaten(k, m, fr); const tot = mealMacros(k, m);
+  sheet(`<h3>${esc(m.n)}: cosa hai mangiato?</h3><p class="muted">Per ogni alimento indica quanto ne hai mangiato.</p>
+    <div class="part-list">${m.items.map(it => `<div class="part-row"><span>${esc(optLabel(chosenOpt(k, it)))}</span><div class="seg mini">${FR_OPTS.map(([v, lb]) => `<button class="${(fr[it.id] ?? 1) === v ? 'on' : ''}" data-a="partSet" data-i="${it.id}" data-v="${v}">${lb}</button>`).join('')}</div></div>`).join('')}</div>
+    <p class="muted center sm">Mangiato ${Math.round(eaten.k)} di ${Math.round(tot.k)} kcal · mancano ${Math.round(Math.max(0, tot.k - eaten.k))} kcal</p>
+    ${btn('Calcola cosa manca', 'partConfirm', '', 'primary full')}`);
+}
 
 const A = {
   tab: el => { UI.tab = el.dataset.t; UI.view = null; if (UI.tab === 'diet') UI.dietDate = today(); render(); window.scrollTo(0, 0); },
@@ -801,7 +835,44 @@ const A = {
       <div class="opts">${opts.map((o, i) => `<button class="opt" data-a="pickMealRec" data-i="${i}"><b>${esc(o.title)}</b><span>${o.desc}</span></button>`).join('')}</div>
       <p class="muted sm">Proposte calcolate su valori medi: se il nutrizionista ti ha dato regole per i pasti saltati, valgono le sue.</p>`);
   },
-  pickMealRec: el => { const { k, mid, opts } = pendingRecovery; const o = opts[+el.dataset.i]; applyMealRecovery(k, mid, o); closeSheet(); toast(o.type === 'none' ? 'Segnato come saltato' : 'Piano aggiornato'); render(); },
+  pickMealRec: el => { const { k, mid, opts, fr } = pendingRecovery; const o = opts[+el.dataset.i]; applyMealRecovery(k, mid, o, fr); closeSheet(); toast(o.type === 'none' ? (fr ? 'Segnato come parziale' : 'Segnato come saltato') : 'Piano aggiornato'); render(); },
+  mealPart: el => { const k = el.dataset.k, mid = el.dataset.m; const m = dietDay(k).find(x => x.id === mid); const fr = {}; m.items.forEach(i => { fr[i.id] = 1; }); pendingPartial = { k, mid, fr }; partialSheet(); },
+  partSet: el => { pendingPartial.fr[el.dataset.i] = +el.dataset.v; partialSheet(); },
+  partConfirm: () => {
+    const { k, mid, fr } = pendingPartial; const m = dietDay(k).find(x => x.id === mid);
+    const miss = subM(mealMacros(k, m), mealEaten(k, m, fr));
+    if (miss.k < 40) { const l = dlog(k); l.m[mid] = 'part'; l.part[mid] = fr; save(); closeSheet(); render(); toast('Parziale: manca pochissimo, nessun recupero'); return; }
+    const opts = recoverMealOptions(k, mid, miss); pendingRecovery = { k, mid, opts, fr };
+    sheet(`<h3>${esc(m.n)} parziale</h3><p class="muted">Ti mancano circa <b>${Math.round(miss.k)} kcal</b> e <b>${Math.round(miss.p)} g di proteine</b>. Come vuoi recuperarli?</p>
+      <div class="opts">${opts.map((o, i) => `<button class="opt" data-a="pickMealRec" data-i="${i}"><b>${esc(o.type === 'none' ? 'Nessun recupero' : o.title)}</b><span>${o.type === 'none' ? 'Segno solo quello che hai mangiato.' : o.desc}</span></button>`).join('')}</div>`);
+  },
+  swapMeal: el => {
+    const k = el.dataset.k, mid = el.dataset.m; const cur = dietDay(k).find(x => x.id === mid); const l = peekDlog(k); const isSw = (l.swap || {})[mid];
+    const all = [];
+    [1, 2, 3, 4, 5, 6, 0].forEach(d => (S.diet.days[d] || []).forEach(m => { if (d === daySrc(k) && m.id === mid) return; all.push({ d, m, same: m.n.toLowerCase().slice(0, 5) === cur.n.toLowerCase().slice(0, 5) }); }));
+    all.sort((a, b) => (b.same - a.same));
+    const kc = m => Math.round(m.items.reduce((a, it) => addM(a, it.o[0].reduce((x, pt) => addM(x, partMacros(pt)), ZERO)), ZERO).k);
+    sheet(`<h3>Cosa hai mangiato a ${esc(cur.n.toLowerCase())}?</h3><p class="muted">Scegli un pasto del piano: sostituisce quello previsto solo per oggi. In cima trovi i pasti dello stesso tipo.</p>
+      <div class="opts">${isSw ? `<button class="opt sel" data-a="doSwap" data-k="${k}" data-m="${mid}" data-d="" data-src=""><b>Torna al pasto previsto</b><span>Annulla lo scambio</span></button>` : ''}
+      ${all.map(x => `<button class="opt" data-a="doSwap" data-k="${k}" data-m="${mid}" data-d="${x.d}" data-src="${x.m.id}"><b>${esc(x.m.n)} di ${DOW[x.d].toLowerCase()}</b><span>${kc(x.m)} kcal · ${x.m.items.map(i => esc(optLabel(i.o[0]))).join(', ')}</span></button>`).join('')}</div>`);
+  },
+  doSwap: el => {
+    const { k, m, d, src } = el.dataset; const l = dlog(k);
+    if (d === '') delete l.swap[m]; else l.swap[m] = { d: +d, m: src };
+    delete l.part[m]; save(); closeSheet(); render(); toast(d === '' ? 'Ripristinato il pasto previsto' : 'Pasto scambiato');
+  },
+  pickDayMenu: el => {
+    const k = el.dataset.k; const cur = daySrc(k);
+    const tot = d => Math.round((S.diet.days[d] || []).reduce((a, m) => addM(a, m.items.reduce((x, it) => addM(x, it.o[0].reduce((y, pt) => addM(y, partMacros(pt)), ZERO)), ZERO)), ZERO).k);
+    sheet(`<h3>Quale menu segui ${k === today() ? 'oggi' : 'questo giorno'}?</h3><p class="muted">Utile se scambi i giorni (es. il menu del lunedì di martedì). Le spunte di questo giorno vengono azzerate.</p>
+      <div class="opts">${[1, 2, 3, 4, 5, 6, 0].map(d => `<button class="opt ${d === cur ? 'sel' : ''}" data-a="setDayMenu" data-k="${k}" data-d="${d}"><b>${DOW[d]}${d === dow(k) ? ' (previsto)' : ''}</b><span>${(S.diet.days[d] || []).length} pasti · circa ${tot(d)} kcal${S.settings.judoDays.includes(d) ? ' · giorno di judo' : ''}</span></button>`).join('')}</div>`);
+  },
+  setDayMenu: el => {
+    const k = el.dataset.k; const d = +el.dataset.d; const l = dlog(k);
+    if (d === dow(k)) delete l.src; else l.src = d;
+    l.m = {}; l.part = {}; l.swap = {}; l.adj = {}; l.rec = {}; save(); closeSheet(); render();
+    toast(d === dow(k) ? 'Menu previsto ripristinato' : `Oggi segui il menu di ${DOW[d].toLowerCase()}`);
+  },
   extraDone: el => { const l = dlog(el.dataset.k); const x = l.extra.find(e => e.id === el.dataset.id); if (x) x.done = !x.done; save(); render(); },
   extraDel: el => { const l = dlog(el.dataset.k); l.extra = l.extra.filter(e => e.id !== el.dataset.id); save(); render(); },
   pickAlt: el => {
